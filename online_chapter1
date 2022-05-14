@@ -1,0 +1,109 @@
+objectives:
+1. logical structure of a database cluster
+2. physical structure of a database cluster
+3. internal layout of a heap table file
+4. methods of writing and reading data to a table
+
+数据库集簇： 由多个数据库组成
+初始化完数据库
+postgres存放数据字典全局的信息
+template0 -- database templates -- need explicitly indicate using this template
+template1 -- 数据库模板 -by default
+--template can be edited as per user or company requirement, where the template can store specific tables like audit table, and for the rest of the database built by this template will have these tables
+
+/*
+All indexes in PostgreSQL are secondary indexes, 
+meaning that each index is stored separately from the table's main data area 
+(which is called the table's heap in PostgreSQL terminology)
+*/
+
+in postgresql, all objects including databases, tables, views and indexes have their own oid (object id)
+
+pg_database to view database oid
+pg_class to view table oid
+
+--query pg_database view to know the column
+\d pg_database -- like oracle : desc <=> \d
+
+\c testdb
+\d pg_class
+-- relname : relation name <=> table name 
+---- postgresql 在数据字典中用小写存储 --- 
+--例如 select relname, oid from pg_class where relname='test_table'; 这里面如果是Oracle， test_table 就要大写，但PG不用，原先是小写就会存成小写在数据字典中
+
+----------------------------------------- physical structure ---------
+base directory: $PGDATA
+旗下有
+postgresql.conf
+base/... :旗下以数据库oid为子目录，也是数据库物理存放位置： 目录存放该数据库所有对象
+
+postgresql: 一个表对应一个数据文件
+select relname, oid, relfilenode from pg_class where relname='test_table';
+relfilenode: 数据文件的名字， 如果表是空的，那么Linux level是没有分配空间的，分配大小按数据库，比如插入1k data, but data block is per 8k, ls -l you will see 8k is occupied in linux
+truncate table test_table;
+select relname, oid, relfilenode from pg_class where relname='test_table';
+--这个时候能看到relfilenode 改变了，也就是数据文件名字改了，pg对待truncate是直接删掉表数据文件指针，重新建一个，从而快速释放数据块
+（notes: truncate, reindex, cluster 等操作都会造成relfilenode number change)
+
+使用内置函数 pg_relation_filepath查看表文件路径：
+select pg_relation_filepath('test_table');
+gp_relation_filepath
+---------------------
+base/16384/18812
+
+文件超过1G之后，新文件规则：
+cd $PGDATA
+ls -la -h base/16384/19427*
+-rw------1 data/base/16384/19427
+-rw------1 data/base/16384/19427.1
+(notes: 可通过修改参数去修改文件尺寸limit，但是如果修得太大比如100G一个，做读取很费I/O)
+除此之外还有两个辅助文件，结尾分别是（'_fsm' 和 '_vm')
+
+fsm: free space map: 可用空间地图，找到该表数个数据文件中有哪些可用的数据块，然后插入到指定的数据块当中
+vm:  visible map   : 可见性地图，记录哪些块没有dead tuple和哪些需要整理空间的， pgsql里面有个vacuum：空间整理，会读取visible map，在scan时，会跳过不需要整理的空间
+
+postgresql tablespace:
+通过表空间将data存放到别的disk中，比如base在/pgsql/12.2/data/base
+如果想将data分别存到/pgsql/12.2/data1和/pgsql/12.2/data2则需要tablespace
+然后将db1指向tbl1, 将来table1就会写在/pgsql/12.2/data1
+    将db2指向tbl2, 将来table2就会写在/pgsql/12.2/data2
+    同时pgsql 也支持表指定表空间存放，例如在db3 create table3 指定存放到tbl2上面，但是这样逻辑管理有可能会混乱
+这样可以分布i/o操作，有助于调优
+
+\h create tablespace
+
+create tablespace tbl1 location 'home/postgres/tbl_dir/';
+
+--pg 如何管理表空间？
+在base directory下有个pg_tblspc, 目录包含新建tablespace oid,里面是链接文件
+$PGDATA/pg_tblspc
+
+\d pg_tablespace
+select spcname,oid from pg_tablespace;
+pg_default 1663
+pg_global  1664
+tbl1       16389
+
+ll $PGDATA/pg_tblspc
+16389 -> home/postgres/tbl_dir/
+
+ll home/postgres/tbl_dir/
+$PG_SERVERVERSION/ 如： PG_12_202012092
+
+pgsql的数据块
+page header: 页头 <==>相当于Oracle 的 block header 块头
+page header 由上向下增长
+tuple: 数据表里看到的每一行数据，在page中是以tuple的形式存储
+如插入tuple1（一条数据）, 在page header产生一个行指针
+
+读数据 -- reading heap tuples: 
+a. sequential scan: 全表扫描、顺序扫描
+  扫描页头行指针 page header pointer，扫完一个数据块到下一个数据块
+b. index scan 索引扫描
+  扫描索引找到tid, 找到这个表对应的块对应的数据行
+  
+
+
+
+
+
