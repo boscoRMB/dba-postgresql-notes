@@ -104,6 +104,19 @@ b. index scan 索引扫描
   
 
 
+表中的页包含以下三种数据：
+Internal Layout of a Heap Table File
+•heap tuple(s)-堆元组（行）是记录数据本身。它们从页面底部开始按顺序堆叠。因为PostgreSQL需要同时了解并发控制（CC）和WAL。
+•line pointer(s)-行指针为4字节长，并保存指向每个堆行的指针。它也被称为项指针。行指针形成一个简单的数组，它起到元组索引的作用。每个索引从1开始按顺序编号，称为偏移量编号。
+                    当一个新的行被添加到页面中时，一个新的行指针也被推到数组中以指向新的行
+•header data-由page header data结构定义的头数据在页面的开头分配。它的长度为24字节，包含有关该页的一般信息。结构的主要变量如下页所述。
 
-
+块头结构：
+Internal Layout of a header data
+•pd_lsn–此变量存储此页最后一次更改所写入的XLOG记录的LSN(日志序列号)。它是一个8字节无符号整数，与WAL（Write-Ahead Logging）机制相关
+•pd_checksum–此变量存储此页的校验和值。（请注意，此变量在9.3版或更高版本中受支持；在早期版本中，此部分存储了页面的timelineId。）
+•pd_lower, pd_upper–pd_lower-指向行指针的末尾，pd_upper指向最新行的开头。
+•pd_special–此变量用于索引。在表格内的页面中，它指向页面的末尾。（在索引内的页面中，它指向特殊空间的开头，特殊空间是指仅由索引保存的数据区域，
+            根据索引类型（如B-树、GiST、GiN等）包含特定数据。）
+            
 
