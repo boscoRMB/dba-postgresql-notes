@@ -2,3 +2,81 @@ Process and Memory Architecture
 
 PostgreSQL 内存结构
 PostgreSQL 后台进程
+
+
+PostgreSQL进程结构：
+•postgres server process-postgres服务器进程是与数据库群集管理相关的所有进程的父进程。
+•backend process-每个后端进程处理连接的客户端发出的所有查询和语句。
+•background processes-各种后台进程执行用于数据库管理的每个特性的进程（例如清空和检查点进程）。
+•replication associated processes-在与复制相关联的进程中，它们执行流式复制. -----只有配置主从同步的时候才会有
+•background worker process-在版本9.3支持的后台工作进程中，它可以执行用户实现的任何处理
+
+Postgres Server Process：
+•postgres服务器进程是PostgreSQL服务器中所有进程的父进程。早期版本它被称为“postmaster”。
+•pg_ctl实用程序启动该进程，然后派生出各个后台进程。同时分配共享内存区域. pg_ctl start instance, and will start the Postgres Server Process and divide shared memory area
+•一个postgres服务器进程侦听一个网络端口，默认端口为5432。--- 一个实例只能监听一个端口
+--server process fork() background writer/checkpointer/autovacuum/WAL writer/statistic collector/log writer/archiver
+                 fork() backend process
+
+Backend Processes：类似于Oracle server process
+•后端进程（也称为postgres）由postgres服务器进程启动，并处理一个连接的客户端发出的所有查询。
+•PostgreSQL允许多个客户端同时连接；配置参数max_connections控制客户端的最大数量。
+  \d pg_settings 
+  select name, setting from pg_settings where name like '%connect%';
+  max_connections                   | 100
+  superuser_reserved_connections    | 3
+  ###client avaliable connections = max-reserved
+•基于WEB应用程序，通常使用池中间件（pgbouncer或pgpoolII）。
+
+
+Background Processes：
+1. background writer: 类似于Oracle dbwr:将数据缓冲区的脏块写到磁盘
+    In this process, dirty pages on the shared buffer pool are written to a persistent storage (e.g., HDD, SSD) on a regular basis gradually. 
+    (In version 9.1 or earlier, it was also responsible for checkpoint process.)
+2. checkpointer
+    In this process in version 9.2 or later, checkpoint process is performed.
+3. autovacuum launcher （空间整理：将数据块删除的行整理出来）例如：pg 的update是删除行，然后重新插入，慢慢的数据块里面就会有没释放空间的删除行（tuple),autovacuum launcher process can release the space of data block/pages
+    The autovacuum-worker processes are invoked for vacuum process periodically. (More precisely, it requests to create the autovacuum workers to the postgres server.)
+4. WAL writer : write ahead log 预写日志 (类似Oracle lgwr-- redolog)
+    This process writes and flushes periodically the WAL data on the WAL buffer to persistent storage.
+5. statistics collector
+    In this process, statistics information such as for pg_stat_activity and for pg_stat_database, etc. is collected.
+6. logging collector (logger)
+    This process writes error messages into log files. not only error log, but also any customized log users wanted to collect
+7. archiver
+    In this process, archiving logging is executed.
+
+how to check process:
+ps -ef | grep -i postgres
+--postgres 2607  2605  $PGDATA
+postgres>pstree-p 2605
+
+----------------------------------------Memory Architecture-------------------------------------
+PostgreSQL中的内存架构可以分为两大类：
+•Local memory area –由每个后端进程分配给自己使用.
+•Shared memory area –由PostgreSQL服务器的所有进程使用
+
+
+Local Memory Area：
+1. work_mem
+  Executor uses this area for sorting tuples by ORDER BY and DISTINCT operations, and for joining tables by merge-join and hash-join operations.
+2. maintenance_work_mem
+   Some kinds of maintenance operations (e.g., VACUUM, REINDEX) use this area.
+3. temp_buffers
+  Executor uses this area for storing temporary tables.
+  
+Shared Memory Area：
+1. shared buffer pool 数据缓冲区，把table/index 数据读到内存
+  PostgreSQL loads pages within tables and indexes from a persistent storage to here, and operates them directly.
+2. WAL buffer 临时存放预写日志
+  To ensure that no data has been lost by server failures, PostgreSQLsupports the WALmechanism. WALdata (also referred to as XLOGrecords) are transaction log in PostgreSQL; and WALbuffer is a buffering area of the WALdata before writing to a persistent storage.
+3. commit log 提交日志缓冲区 记录每个事务的最终状态：commit/rollback/in_progress
+  Commit Log(CLOG) keeps the states of all transactions (e.g., in_progress,committed,aborted) for Concurrency Control (CC) mechanism.
+  
+  
+transaction flow
+client raise a sql request -- backend (translate to db language) -- write to WAL buffer -- WAL writer read WAL buffer and write to WAL segment （WAL file)
+    -- 当写到WAL segment上面，WAL buffer就会释放 -- 
+
+
+
