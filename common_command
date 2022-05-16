@@ -1,0 +1,16 @@
+pg_ctl start
+
+psql test < countries.sql -- run sql file in test database
+
+\c test -- connect to test database
+\d tbl\pg_settings\pg_stats -- view table structure
+explain select * from tbl where data<200; -- create explain plan
+
+create table tbl (id int primary key, data int); -- create table 
+insert into tbl select generate_series(1,10000), generate_series(1,10000); -- insert dump data
+create index tbl_data_ind on tbl(data);
+
+select relpages, reltuples from pg_class where relname ='tbl_data_ind'; -- it shows index uses how many tuples and pages
+select relpages,reltuples from pg_class where relname='tbl';  -- it shows table use how many tuples and pages
+
+select * from countries limit 10; -- first 10 rows
