@@ -6,13 +6,205 @@ Query Processing
 •三种连接方法：嵌套循环、合并和哈希连接
 •创建多表查询的计划树的过程
 
-1. 解析器
+1. 解析器 parser
   解析器从纯文本的SQL语句生成解析树。
-2. 分析仪/分析器
+2. 分析仪/分析器 analyzer
   分析器/分析器对解析树执行语义分析并生成查询树。
-3. 重写器
+3. 重写器 rewriter
   重写器使用存储在规则系统中的规则（如果存在此类规则）转换查询树。
-4. 规划器
-  计划者从查询树生成可以最有效地执行的计划树。
-5. 执行器
+4. 规划器 Planner
+  计划者从查询树生成可以最有效地执行的计划树。 --- 消耗资源最大，选择执行计划的好坏，直接决定执行时长
+5. 执行器 executor
   执行器通过按计划树创建的顺序访问表和索引来执行查询。
+
+parse tree:
+解析器生成一个解析树，后续子系统可以从纯文本的SQL语句中读取该树
+
+query tree:
+分析器/分析器对解析器生成的解析树运行语义分析，并生成查询树。
+
+Rewriter ???
+重写器是实现规则系统的系统，必要时根据pg_rules系统目录中存储的规则转换查询树。
+
+PostgreSQL中的视图是通过规则系统实现的。通过“创建视图”命令定义视图时，将自动生成相应的规则并将其存储在目录中。
+CREATE VIEW employees_list
+AS SELECT e.id, e.name, d.nameAS department
+FROM employees AS e, departments AS d
+WHERE e.department_id= d.id;
+假设已经定义了以下视图并且相应的规则存储在pg_rules系统目录中
+
+Planner and Executor
+规划器从重写器接收查询树，并生成（查询）计划树，执行者可以最有效地处理该树。。
+pg_hint_plan插件-- oracle 可以explicitly use hint to let oracle use that execution plan, but postgres does not support it, and you need the plugin pg_hint_plan
+PostgreSQL不支持SQL中的计划器提示，并且永远不会支持它。如果要在查询中使用提示，需要引用pg_hint_plan扩展插件。
+
+
+--------------------------------------execution plan -------------------
+explain show sql execution plan, like other rdbms
+testdb=# EXPLAIN SELECT * FROM tbl_aWHERE id < 300 ORDER BY data;
+Sort (cost=182.34..183.09 rows=300 width=8)
+  Sort Key: data
+  -> SeqScan on tbl_a(cost=0.00..170.00 rows=300 width=8)
+    Filter: (id < 300)
+(4 rows)
+只是执行计划，并不是真的执行
+如何看： 从下往上，从最向右缩进的看起
+filter: filter 方式
+SeqScan: 全表扫描
+cost:访问成本
+rows:返回行数
+sort key: 排序的列
+sort cost: 排序成本
+
+执行器通过后端进程执行，产生执行计划
+把所需的数据块读到数据缓冲区： database cluster to buffer manager
+把结果返回给执行器： buffer manager to executor
+执行器： pg会分配工作内存（work_mem) 给执行器，如果数据量太大，工作内存（work_mem)不够的话，就会产生临时文件（Temporary file），用他来存储中间的结果，最后再删掉。
+
+
+---------------------------------------单表查询成本估算-------------------------
+单表查询中的成本估算
+•优化基于成本。成本是无量纲值，这些不是绝对的绩效指标，而是比较运营相对绩效的指标。
+•执行者执行的所有操作都具有相应的成本函数。
+•三种成本：启动、运行和总计。总成本是启动和运行成本的总和
+  1.启动成本是在获取第一个行之前花费的成本。例如，索引扫描节点的启动成本是读取索引页面以访问目标表中的第一个元组的成本。
+  2.运行成本是获取所有行的成本。
+  3.总成本是启动和运行成本的成本之和。
+sample:
+testdb=# EXPLAIN SELECT * FROM tbl;
+QUERY PLAN
+---------------------------------------------------------
+SeqScan on tbl(cost=0.00..145.00 rows=10000 width=8)
+在第4行中，命令显示有关顺序扫描的信息。在“成本”部分中，有两个值：0.00和145.00。在这种情况下，启动和总成本分别为0.00和145.00。
+
+
+
+--------------------------------单表查询成本估算之顺序扫描(全表扫描）----------------------------
+Sequential Scan成本计算
+顺序扫描的成本由cost_seqscan（）函数估算。我们将探讨如何估算以下查询的顺序扫描成本。
+testdb=# SELECT * FROM tblWHERE id < 8000;
+在顺序扫描中，启动成本等于0，运行成本由以下等式定义：
+‘run cost’=‘cpurun cost’+‘diskrun cost’
+=(cpu_tuple_cost（访问一行数据代价）+cpu_operator_cost（cpu操作成本）)×𝑁tuple+seq_page_cost（访问数据块的代价）×𝑁page（数据块数量）
+
+查询表的块数（page）和行数（tuple）：
+testdb=# SELECT relpages, reltuples FROM pg_class WHERE relname= 'tbl';
+relpages| reltuples
+----------+-----------
+45 | 10000
+𝑁tuple= 10000 （1）
+𝑁page=45（2）
+根据（1，2）得出
+‘runcost’=(0.01+0.0025)×10000+1.0×45=170.0
+总成本：
+‘totalcost’=0.0+170.0=170
+
+怎么找出cpu_tuple_cost、cpu_operator_cost、seq_page_cost 呢？
+\d pg_settings
+test=# select name, setting from pg_settings where name like '%cost%';
+             name             | setting 
+------------------------------+---------
+ autovacuum_vacuum_cost_delay | 2
+ autovacuum_vacuum_cost_limit | -1
+ cpu_index_tuple_cost         | 0.005
+ cpu_operator_cost            | 0.0025
+ cpu_tuple_cost               | 0.01
+ jit_above_cost               | 100000
+ jit_inline_above_cost        | 500000
+ jit_optimize_above_cost      | 500000
+ parallel_setup_cost          | 1000
+ parallel_tuple_cost          | 0.1
+ random_page_cost             | 4
+ seq_page_cost                | 1
+ vacuum_cost_delay            | 0
+ vacuum_cost_limit            | 200
+ vacuum_cost_page_dirty       | 20
+ vacuum_cost_page_hit         | 1
+ vacuum_cost_page_miss        | 10
+(17 rows)
+(PS: tunning does not mean tuning thses parameters)
+
+
+-------------------------------------单表查询成本估算之索引扫描----------------------------------
+3.2.1. Index Scan成本估算
+计算下面的查询语句通过索引访问成本计算：
+create index tbl_data_idx on tbl(data);
+testdb=# SELECT id, data FROM tblWHERE data < 240;
+3.2.2.1.先查询索引的行数和页数𝑁𝑖𝑛𝑑𝑒𝑥,𝑡𝑢𝑝𝑙𝑒𝑁index,𝑝𝑎𝑔𝑒
+testdb=# SELECT relpages, reltuplesFROM pg_classWHERE relname= 'tbl_data_idx';
+relpages| reltuples
+----------+-----------
+30 | 10000
+𝑁index,𝑝𝑎𝑔𝑒=30（3）
+𝑁𝑖𝑛𝑑𝑒𝑥,𝑡𝑢𝑝𝑙𝑒=10000（4）
+
+test=# explain select * from tbl where data<240;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Index Scan using tbl_data_ind on tbl  (cost=0.29..13.47 rows=239 width=8)
+   Index Cond: (data < 240)
+(2 rows)
+启动成本：0.29
+总成本：13.47
+
+3.2.2. Index Scan 成本估算
+3.2.2.1.启动成本计算公式
+‘start-upcost’={ceil(𝑙𝑜𝑔2(𝑁𝑖𝑛𝑑𝑒𝑥,𝑡𝑢𝑝𝑙𝑒))+(𝐻𝑖𝑛𝑑𝑒𝑥+1)×50}×cpu_operator_cost
+𝐻𝑖𝑛𝑑𝑒𝑥指的是索引的高度
+启动成本计算结果：
+根据第（3）𝑁𝑖𝑛𝑑𝑒𝑥,𝑡𝑢𝑝𝑙𝑒=10000，𝐻𝑖𝑛𝑑𝑒𝑥=1 和cpu_operator_cost= 0.0025 (by default)
+得出如下结果：
+‘start-upcost’={ceil(𝑙𝑜𝑔2(10000))+(1+1)×50}×0.0025=0.285（5）
+
+Index Scan成本估算
+3.2.2.2.运行成本计算公式 -- 通过索引访问基表的代价
+索引扫描的运行成本是表和索引的cpu成本和IO（输入/输出）成本之和
+‘runcost’=(‘index cpu cost’+‘table cpu cost’)+(‘index IO cost’+‘table IO cost’)
+前三个成本（即索引cpu成本，表cpu成本和索引IO成本）计算公式：
+‘indexcpucost’=Selectivity×𝑁index,𝑡𝑢𝑝𝑙𝑒×(cpu_index_tuple_cost+qual_op_cost),
+‘tablecpucost’=Selectivity×𝑁𝑡𝑢𝑝𝑙𝑒×cpu_tuple_cost, ‘
+indexIOcost’=ceil(Selectivity×𝑁𝑖𝑛𝑑𝑒𝑥,𝑝𝑎𝑔𝑒)×random_page_cost,
+
+Selectivity 可选性
+表的每一列的MCV(Most Common Value)作为一对most_common_vals和most_common_freqs的列存储在pg_stats视图中。
+•most_common_vals是统计MCVs列表的列。
+•most_common_freqs是统计mcv的频率列。
+让我们考虑下面的查询，它有一个WHERE子句，“contain=”Asia'：
+testdb=# SELECT * FROM countries WHERE continent = 'Asia';
+
+•histogram_bounds
+是一个值列表，用于将列的值分成大致相等的总体组
+•Buckets and histogram_bounds.
+
+•Selectivity
+WHERE data<240 计算选择性
+Selectivity= 2+(240−hb[2])/(hb[3]−hb[2])100= 2+(240−200)/(300−200)100= 2+40/100100=0.024（6）
+
+Index Scan成本估算
+‘indexcpucost’=Selectivity×𝑁index,𝑡𝑢𝑝𝑙𝑒×(cpu_index_tuple_cost+qual_op_cost),
+‘tablecpucost’=Selectivity×𝑁𝑡𝑢𝑝𝑙𝑒×cpu_tuple_cost, ‘
+indexIOcost’=ceil(Selectivity×𝑁𝑖𝑛𝑑𝑒𝑥,𝑝𝑎𝑔𝑒)×random_page_cost,
+前三个成本（即索引cpu成本，表cpu成本和索引IO成本）计算公式：
+根据（1，3，4，6）索引cpu成本、表cpu成本和索引IO成本计算结果：
+‘indexcpucost’=0.024×10000×(0.005+0.0025)=1.8,（7）
+‘tablecpucost’=0.024×10000×0.01=2.4,（8）
+‘indexIOcost’=ceil(0.024×30)×4.0=4.0.（9）
+Index Scan成本估算
+table IO cost计算公式：
+tableIOcost=max_IO_cost+indexCorrelation2×(min_IO_cost−max_IO_cost).
+
+Index Scan成本估算
+min_IO_cost计算公式与结果：
+min_IO_cost=1×random_page_cost+(ceil(Selectivity×𝑁page)-1)×seq_page_cost
+min_IO_cost=1×4.0+(ceil(0.024×45))−1)×1.0=5.0（11）
+max_IO_cost计算公式与结果：
+max_IO_cost= 𝑁page×random_page_cost
+根据第（2）𝑁page=45 得出如下结果：
+max_IO_cost=45×4.0=180.0（10）
+
+indexCorrelation
+indexCorrelation=1.0 （12）
+根据（10，11，12）得出：
+‘tableIOcost’=180.0+1.02×(5.0−180.0)=5.0（13）
+根据（7，8，9，13）得出索引访问总成本：
+‘runcost’=(1.8+2.4)+(4.0+5.0)=13.2 （14）
