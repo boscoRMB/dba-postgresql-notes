@@ -242,4 +242,229 @@ indexCorrelation=1.0 （12）
 根据（7，8，9，13）得出索引访问总成本：
 ‘runcost’=(1.8+2.4)+(4.0+5.0)=13.2 （14）  -- ‘runcost’=(‘index cpu cost’+‘table cpu cost’)+(‘index IO cost’+‘table IO cost’)
 
+列值相同的行存放的比较集中，i/o成本最低
+比如select * from employee where name ='cuug' 
+返回100 rows
+然后这100 rows刚好存放在两个pages上面，就会i\o cost low: 这种情况就是用索引好
+相反如果100 rows在100 个pages上面，i\o cost max： 这种情况用full table scan,因为索引访问也需要代价，索引访问完还要数据访问，还不如直接全表扫描
 
+
+
+test=# \d tbl_corr
+               Table "public.tbl_corr"
+  Column  |  Type   | Collation | Nullable | Default 
+----------+---------+-----------+----------+---------
+ col      | text    |           |          | 
+ col_asc  | integer |           |          | 
+ col_desc | integer |           |          | 
+ col_rand | integer |           |          | 
+ data     | text    |           |          | 
+Indexes:
+    "tbl_corr_asc_idx" btree (col_asc)
+    "tbl_corr_desc_idx" btree (col_desc)
+    "tbl_corr_rand_idx" btree (col_rand)
+
+
+test=# analyze tbl_corr;
+ANALYZE
+test=# SELECT tablename,attname, correlation FROM pg_stats WHERE tablename= 'tbl_corr';
+ tablename | attname  | correlation 
+-----------+----------+-------------
+ tbl_corr  | col      |  0.07692308
+ tbl_corr  | col_asc  |           1
+ tbl_corr  | col_desc |          -1
+ tbl_corr  | col_rand |  0.12587413
+ tbl_corr  | data     |            
+(5 rows)
+
+testdb=# SELECT * FROM tbl_corr WHERE col_asc BETWEEN 2 AND 4;
+因为正相关，2-4都在同一个pages上面，所以会应index scan
+testdb=# SELECT * FROM tbl_corr WHERE col_rand BETWEEN 2 AND 4;
+因为相关性低，2，3，4三个tuples刚好在3个pages上面，所以避免重复高i/o，会用full table scan
+
+
+------------------------------seq_page_costand random_page_cost相关参数配置------------------------------------------
+大部分情况参数是不用修改的，但是有些可以根据实际情况修改
+HDD硬盘：
+seq_page_cost=1.0
+random_page_cost=4.0
+SSD硬盘：
+seq_page_cost=1.0
+random_page_cost=1.0
+
+
+---------------------------------------单表查询成本估算之排序--------------------------------------------------
+3.2.3. Sort
+
+成本估算公式：
+O(𝑁𝑠𝑜𝑟𝑡×𝑙𝑜𝑔2(𝑁𝑠𝑜𝑟𝑡))
+估算以下查询语句排序成本：
+testdb=# SELECT id, data FROM tblWHERE data < 240 ORDER BY id;
+
+start-up成本估算公式：
+‘start-upcost’=C+comparison_cost×𝑁sort×log2(𝑁sort)
+根据：
+C=上次索引扫描的总成本=13.485
+comparison_cost=2×cpu_operator_cost=2×0.0025
+得出：
+‘start-upcost’=13.485+(2×0.0025)×240.0×log2(240.0)=22.973
+‘runcost’=cpu_operator_cost×𝑁sort=0.0025×240=0.6
+‘totalcost’=22.973+0.6=23.573
+
+是不是建了索引，就不用排序呢？
+例子
+test=# explain select * from tbl where data<240 order by id;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Sort  (cost=22.91..23.51 rows=239 width=8)
+   Sort Key: id
+   ->  Index Scan using tbl_data_ind on tbl  (cost=0.29..13.47 rows=239 width=8)
+         Index Cond: (data < 240)
+(4 rows)
+这里面id是primary key, 它是有索引的，但是为什么还有sorting cost呢？
+because data was filter by where condition, 提取出来的数据，id 列的index已经失效了，因为不一定是按id顺序
+如果：
+test=# explain select * from tbl where data<240 order by data;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Index Scan using tbl_data_ind on tbl  (cost=0.29..13.47 rows=239 width=8)
+   Index Cond: (data < 240)
+(2 rows)
+索引提取的数据本来就按照data index order过了，所以没有sorting cost
+如果：
+test=# explain select * from tbl where data>240 order by data;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Index Scan using tbl_data_ind on tbl  (cost=0.29..338.09 rows=9760 width=8)
+   Index Cond: (data > 240)
+(2 rows)
+原本全表扫描变成索引扫描，省去了排序，但是因为selectivity很大，所以索引扫描相当于全表所有pages扫一遍，所以cost 很高，比不filter还高
+不加filter: Seq Scan on tbl  (cost=0.00..170.00 rows=9760 width=8)
+但是如果本身没有index，然后又必须执行排序sort的话
+test=# create table tbl2 as select * from tbl;
+SELECT 10000
+test=# \d tbl2
+                Table "public.tbl2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           |          | 
+ data   | integer |           |          | 
+
+test=# explain select * from tbl2 order by data;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Sort  (cost=809.39..834.39 rows=10000 width=8)
+   Sort Key: data
+   ->  Seq Scan on tbl2  (cost=0.00..145.00 rows=10000 width=8)
+(3 rows)
+
+test=# 
+可见，在没有index的帮助下，sorting cost is huge. 
+综上所诉，如果排序是必须的话，build index in sorting condition will help except the where condition is different from the order by condition. 
+
+
+------------------------------------------单表查询之创建计划树--------------------------------------------------
+3.3. 为单表查询创建计划树
+
+PostgreSQL中的计划器执行三个步骤：
+•进行预处理。
+•通过估计所有可能的访问路径的成本，获得最便宜的访问路径。
+•从最便宜的路径创建计划树
+
+3.3.1. Preprocessing
+PostgreSQL中的计划器执行三个步骤：
+•简化目标列表、限制子句等。
+•规范化布尔表达式。
+•展平AND/OR 表达式
+
+3.3.2.获得最便宜的访问路径
+.
+1、创建RelOptInfo结构来存储访问路径和相应的开销。
+2、估计所有可能的访问路径的成本，并将访问路径添加到RelOptInfo结构中。
+创建路径，估计顺序扫描的成本，并将估计的成本写入路径。然后，将路径添加到RelOptInfo结构的路径列表中。
+如果存在与目标表相关的索引，则创建索引访问路径，估算所有索引扫描成本，并将估算成本写入路径。然后，将索引路径添加到路径列表中。
+如果位图扫描可以完成，则创建位图扫描路径，估计所有位图扫描成本，并将估计成本写入路径。然后，位图扫描路径被添加到路径列表中。
+3、获取RelOptInfo结构的路径列表中最便宜的访问路径。
+4、如有必要，估算LIMIT, ORDER BY 和ARREGISFDD等成本
+
+3.3.2.1. Example 1
+首先，我们探索一个没有索引的简单单表查询；这个查询同时包含WHERE和ORDER BY子句。
+
+
+
+
+
+------------------------------------------单表查询之执行器执行----------------------------------
+3.4. How the Executor Performs
+.
+testdb=# EXPLAIN SELECT * FROM tbl_1WHERE id < 300 ORDER BY data;
+QUERY PLAN
+---------------------------------------------------------------
+Sort (cost=182.34..183.09 rows=300 width=8)
+Sort Key: data
+-> SeqScan on tbl_1(cost=0.00..170.00 rows=300 width=8)
+Filter: (id < 300)
+(4 rows)
+
+-----------------------------------------Temporary Files-------------------------------------------------------
+test=# create table tbl_big (id int primary key, data int);
+CREATE TABLE
+test=# insert into tbl_big select generate_series(1,25000000), generate_series(1,25000000);
+
+test=# explain select * from tbl_big;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Seq Scan on tbl_big  (cost=0.00..360621.20 rows=25000120 width=8)
+(1 row)
+
+test=# explain select * from tbl_big order by data;
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Gather Merge  (cost=1714817.42..4145554.42 rows=20833434 width=8)
+   Workers Planned: 2
+   ->  Sort  (cost=1713817.39..1739859.19 rows=10416717 width=8)
+         Sort Key: data
+         ->  Parallel Seq Scan on tbl_big  (cost=0.00..214787.17 rows=10416717 width=8)
+(5 rows)
+
+test=# explain analyze select * from tbl_big order by data;
+                                                                 QUERY PLAN                             
+                                    
+--------------------------------------------------------------------------------------------------------
+------------------------------------
+ Gather Merge  (cost=1714785.68..4145479.51 rows=20833064 width=8) (actual time=20660.819..31933.470 row
+s=25000000 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Sort  (cost=1713785.65..1739826.98 rows=10416532 width=8) (actual time=20365.803..22119.705 rows=
+8333333 loops=3)
+         Sort Key: data
+         Sort Method: external merge  Disk: 145904kB
+         Worker 0:  Sort Method: external merge  Disk: 146784kB
+         Worker 1:  Sort Method: external merge  Disk: 147760kB
+         ->  Parallel Seq Scan on tbl_big  (cost=0.00..214785.33 rows=10416532 width=8) (actual time=0.0
+97..13722.305 rows=8333333 loops=3)
+ Planning Time: 1.051 ms
+ Execution Time: 33497.984 ms
+(11 rows)
+如果你发现你的临时文件产生比较多，可能你排序的临时文件太多了，那么可能你的work_mem太低了，需要调优
+
+临时文件是在base/pg_tmp子目录中临时创建的，命名方法如下所示。
+{"pgsql_tmp"} + {PIDof the postgresprocess which creates the file} . {sequencialnumber from 0}
+$ ls-la /usr/local/pgsql/data/base/pgsql_tmp*
+-rw-------1 postgrespostgres10240000 12 4 14:18 pgsql_tmp8903.5
+NOTES: New version of POSTGRESQL
+The temporary files that get created in base/pgsql_tmp during query execution will get deleted when the query is done
+
+多表查询之连接方式
+3.5. Join Operations
+.
+三种连接方式：
+•nested loop join
+•merge join
+•hash join
+支持所有join操作：
+•NATURAL INNER JOIN
+•INNER JOIN
+•LEFT/RIGHT OUTER JOIN
+•FULL OUTER JOIN
