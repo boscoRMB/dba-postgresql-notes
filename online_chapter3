@@ -703,3 +703,83 @@ test=# explain select * from tbl_a as a , tbl_b as b where a.data=b.data;
          ->  Seq Scan on tbl_b b  (cost=0.00..145.00 rows=10000 width=8) ---全表扫描
 (5 rows)
 
+-------------------------------------------创建多表查询的计划树--------------------------------------------
+-------------------------------------3.6.1. Preprocessing----------------------------------
+.
+1、计划和转换CTE
+2、向上拉子查询
+根据子查询的特点，改为自然连接查询。
+testdb=# SELECT * FROM tbl_a AS a, (SELECT * FROM tbl_b) as b WHERE a.id = b.id; -- 子查询
+↓
+testdb=# SELECT * FROM tbl_a AS a, tbl_b as b WHERE a.id = b.id; -- 自然连接
+test=# explain  SELECT * FROM tbl_a AS a, (SELECT * FROM tbl_b) as b WHERE a.id = b.id;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Hash Join  (cost=270.00..441.26 rows=10000 width=16)
+   Hash Cond: (a.id = tbl_b.id)
+   ->  Seq Scan on tbl_a a  (cost=0.00..145.00 rows=10000 width=8)
+   ->  Hash  (cost=145.00..145.00 rows=10000 width=8)
+         ->  Seq Scan on tbl_b  (cost=0.00..145.00 rows=10000 width=8)
+(5 rows)
+可以看出优化器自动将其变成自然连接然后利用hash join 
+例子：
+test=# explain  SELECT * FROM tbl_a AS a, (SELECT * FROM tbl_b where id=200) as b WHERE a.id = b.id;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Nested Loop  (cost=0.57..16.62 rows=1 width=16)
+   ->  Index Scan using tbl_a_pkey on tbl_a a  (cost=0.29..8.30 rows=1 width=8)
+         Index Cond: (id = 200)
+   ->  Index Scan using tbl_b_pkey on tbl_b  (cost=0.29..8.30 rows=1 width=8)
+         Index Cond: (id = 200)
+(5 rows)
+这里用了nested loop， 如果是子查询
+test=# explain select * from tbl_a where id=(select id from tbl_a where id=200);
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Index Scan using tbl_a_pkey on tbl_a  (cost=8.59..16.61 rows=1 width=8)
+   Index Cond: (id = $0)
+   InitPlan 1 (returns $0) ---子查询计划
+     ->  Index Only Scan using tbl_a_pkey on tbl_a tbl_a_1  (cost=0.29..8.30 rows=1 width=4)
+           Index Cond: (id = 200)
+(5 rows)
+
+3、将外部联接转换为内部联接
+
+-------------------------------------3.6.2. Getting the Cheapest Path----------------------
+.
+1、表数量小于12张，应用动态规划得到最优的计划
+2、表数量大于12张，应用遗传查询优化器
+参数geqo_threshold指定的阈值（默认值为12）
+3、分为不同的级别层次来处理
+
+3.6.2. How to get the cheapest access path using dynamic programming.
+.
+在下面，我们将描述规划器如何获取以下查询中最便宜的计划的过程
+
+Processing in Level 1
+
+Processing in Level 2
+
+
+
+3.6.3. Getting the Cheapest Path of a Triple-Table Query
+
+3.6.3.此查询的EXPLAIN命令的结果如下所示：（这里面c表只有20行）
+test=# explain select * from tbl_a as a, tbl_b as b, tbl_c as c where a.id=b.id and b.id=c.id and a.data<40;
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
+ Nested Loop  (cost=2.20..9.61 rows=1 width=24)
+   ->  Merge Join  (cost=1.92..2.90 rows=20 width=16) ---merge join table---刚好印证了，从最小cost的c表出发
+         Merge Cond: (b.id = c.id)
+         ->  Index Scan using tbl_b_pkey on tbl_b b  (cost=0.29..318.29 rows=10000 width=8) ---索引扫描
+         ->  Sort  (cost=1.63..1.68 rows=20 width=8)  -- 排序
+               Sort Key: c.id
+               ->  Seq Scan on tbl_c c  (cost=0.00..1.20 rows=20 width=8)  -- 全表扫描
+   ->  Index Scan using tbl_a_pkey on tbl_a a  (cost=0.29..0.33 rows=1 width=8)
+         Index Cond: (id = b.id)
+         Filter: (data < 40)
+(10 rows)
+
+
+要考虑最低成本，会考虑哪两张表先处理，然后用其结果跟第三张表处理=》 c=(a=b)|a=(b=c)|b=(a=c)
+要判段那两张表返回的函数、结果集最少，就先处理，再跟大表处理
