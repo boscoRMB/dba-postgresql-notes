@@ -1,1 +1,89 @@
 -------------------------Foreign Data Wrappers and Parallel Query-----------------------------------------
+•Foreign Data Wrappers(FDW)
+   postgres_FDW部署
+   Oracle_FDW部署
+   File_FDW部署
+•TPC-H测试简介
+•并行查询工作原理与机制
+•各种并行查询处理方式
+
+4.1. Foreign Data Wrappers (FDW) -- 外部数据包装器 -- 跟其他数据库进行交互
+How FDW perform
+1. request from client -- local server parser 
+  -- local analyzer (check two views, pg_catalog.pg_class and pg_catalog.pg_foreign_table to find out if the table is local or remote) -- send to rewriter -- send to planner (will read pg_catalog.pg_foreign_server and pg_catalog.pg_user_mapping to identified if the table is external or internal and from which server and client -- interact with remote database to extract cost -- generate plan tree -- send to executor -- interact with remote database to execute -- send result back to local server 
+所以是远程收集cost,远程执行
+
+远程执行details
+1. start transaction isolation level repeatble read (事务隔离级别可重复读）
+2. parse:declare c1 cursor for select ... (注意这里远端执行sql是通过游标提取）
+3. bind: (如果有变量，bind绑定变量）
+4. execute: (执行sql）
+5.fetch 100 from c1 (提取执行结果，每次一百行，超过就提取第二次...）
+6. send data 发送结果
+7. close c1 关闭游标
+8. commit transaction
+
+注意：FDW并不会检测死锁，所以提交DML有风险
+
+9.3 初代FDW - 9.5
+localdb=# EXPLAIN SELECT * FROM tbl_a AS a, tbl_b AS b WHERE a.id = b.id AND a.id < 200;
+QUERY PLAN
+------------------------------------------------------------------------------
+Merge Join (cost=532.31..700.34 rows=10918 width=16)
+  Merge Cond: (a.id = b.id)
+  -> Sort (cost=200.59..202.72 rows=853 width=8) -- 返回结果进行排序
+    Sort Key: a.id
+    -> Foreign Scan on tbl_a a (cost=100.00..159.06 rows=853 width=8) -- remote table
+  -> Sort (cost=331.72..338.12 rows=2560 width=8)  -- 返回结果进行排序
+    Sort Key: b.id
+    -> Foreign Scan on tbl_b b (cost=100.00..186.80 rows=2560 width=8) -- remote table 
+    
+    
+9.6 开始
+4.1.2.1. Sequence of SQL statements to execute the Multi-Table Query in Version 9.6 or later:
+Foreign Data Wrappers
+(1) EXPLAIN SELECT id, data FROM public.tbl_a WHERE ((id < 200))
+(2) EXPLAIN SELECT id, data FROM public.tbl_b
+(3) EXPLAIN SELECT id, data FROM public.tbl_a WHERE ((id < 200)) ORDER BY id ASC NULLS LAST
+(4) EXPLAIN SELECT id, data FROM public.tbl_a WHERE ((((SELECT null::integer)::integer) = id)) AND ((id < 200))
+(5) EXPLAIN SELECT id, data FROM public.tbl_b ORDER BY id ASC NULLS LAST
+(6) EXPLAIN SELECT id, data FROM public.tbl_b WHERE ((((SELECT null::integer)::integer) = id))
+(7) EXPLAIN SELECT r1.id, r1.data, r2.id, r2.data FROM (public.tbl_a r1 INNER JOIN public.tbl_b r2 ON (((r1.id = r2.id)) AND ((r1.id < 200))))
+产生一个最好的执行计划，选择最好的计划，利用游标执行
+localdb=# EXPLAIN SELECT * FROM tbl_a AS a, tbl_b AS b WHERE a.id = b.id AND a.id < 200;
+QUERY PLAN
+-----------------------------------------------------------
+Foreign Scan (cost=134.35..244.45 rows=80 width=16)  --- 直接就是远程结果返回
+Relations: (public.tbl_a a) INNER JOIN (public.tbl_b b)
+(2 rows)
+
+如果使用alter server 命令将use_remote_estimate选项设置为on,则计划器将通过执行explain 命令向远程服务器查询计划的成本
+alter server fpg2 options (use_remote_estimate'on');
+这样能使执行语句的每一步都产生执行计划，以此优化器去选择最好的
+
+10 版本之前
+aggregate 函数是在本地进行
+10之后
+localdb=# EXPLAIN SELECT AVG(data) FROM tbl_aAS a WHERE a.id< 200;
+QUERY PLAN
+-----------------------------------------------------
+Foreign Scan (cost=102.44..149.03 rows=1 width=32) -- 只有返回结果了
+Relations: Aggregate on (public.tbl_aa)
+
+--------------------------------本地外部表------------------------------------------------------
+5.1添加本地外部表
+1. -- 添加扩展
+create extension file_fdw;
+2. -- 创建server for file
+create server pg_file_server foreign data wrapper file_fdw;
+
+fdw 部署
+1. 安装插件
+2. 创建fdw server 
+3. 创建 fdw user map
+4. 创建 fdw table
+
+fdw server 
+1. hba allow connect
+
+
