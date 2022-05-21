@@ -86,4 +86,7 @@ fdw 部署
 fdw server 
 1. hba allow connect
 
+cd /soft/postgresql-12.2/contrib/postgres_fdw
+ls
+psql test
 
