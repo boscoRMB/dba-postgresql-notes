@@ -88,5 +88,61 @@ fdw server
 
 cd /soft/postgresql-12.2/contrib/postgres_fdw
 ls
+make install
 psql test
+create extension postgres_fdw;
+create server pgdb foreign data wrapper postgres_fdw options (host 'pg2', port '1922', dbname 'testdb');
+create user scott_pg password 'tiger';
+grant usage on foreign server pgdb to scott_pg;
+
+select user <+> show user
+
+create user mapping for scott_pg server pgdb options (user 'scott', password 'tiger');
+
+\c test scott_pg
+CREATE FOREIGN TABLE emp_fdw (
+ EMPNO      int ,
+ ENAME      VARCHAR(10),
+ JOB        VARCHAR(9),
+ MGR        int,
+ HIREDATE   date,
+ SAL        float4,
+ COMM       float4,
+ DEPTNO     int
+) SERVER pgdb OPTIONS (schema_name 'public', table_name 'emp');  
+
+CREATE FOREIGN TABLE dept_fdw (
+deptno integer,
+dname  character varying(14),
+loc    character varying(13)
+)SERVER pgdb OPTIONS (schema_name 'public', table_name 'dept');
+--当查询时，需要修改hba.conf,添加white list
+
+-- select pg_relation_filepath('emp_fdw'); -- 没有返回，就是没有文件，因为是远程连接
+
+13、在fdw服务器端如果需要查看fdw的执行日志，需要做如下操作：
+	13.1、打开日志：
+log_destination = 'csvlog'         
+logging_collector = on
+log_directory = 'pg_log' ##$PGDATA/pg_log           
+log_filename = 'postgresql-%Y-%m-%d'  
+log_truncate_on_rotation = off
+log_rotation_age = 1d               
+log_rotation_size = 0   
+log_error_verbosity = verbose 
+log_statement = all
+
+	13.2、（fdw客户端）PostgreSQL的FDW支持获取外部表的统计信息来估计查询的计划树的功能，一些FDW扩展使用了这些功能，如postgres_FDW、mysql_FDW、tds_FDW和jdbc2_FDW。             
+ 如果使用ALTER SERVER命令将use_remote_estimate选项设置为on，则计划器将通过执行EXPLAIN命令向远程服务器查询计划的成本；否则，远程多表连接时，不会把连接下推到远程，而是在本地进行连接操作；同时在日志中看不到为每一条sql语句前面加上explain命令。
+ 
+localdb=# ALTER SERVER pgdb OPTIONS (use_remote_estimate 'on');  #这个属性只允许修改一次--开了就不能关掉
+
+	13.3、查看fdw服务器端的日志，可以看到日志打印信息
+	 START TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+	 DECLARE c1 CURSOR FOR 
+	  FETCH 100 FROM c1
+	   CLOSE c1"
+	   COMMIT TRANSACTION
+
+
 
