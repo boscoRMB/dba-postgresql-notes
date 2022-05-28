@@ -14,3 +14,42 @@ select relpages, reltuples from pg_class where relname ='tbl_data_ind'; -- it sh
 select relpages,reltuples from pg_class where relname='tbl';  -- it shows table use how many tuples and pages
 
 select * from countries limit 10; -- first 10 rows
+
+
+
+[postgres@cuug_pg1 ~]$ psql
+psql (12.2)
+Type "help" for help.
+
+postgres=# \l
+                                 List of databases
+   Name    |  Owner   | Encoding |  Collate   |   Ctype    |   Access privileges   
+-----------+----------+----------+------------+------------+-----------------------
+ postgres  | postgres | UTF8     | en_US.utf8 | en_US.utf8 | 
+ template0 | postgres | UTF8     | en_US.utf8 | en_US.utf8 | =c/postgres          +
+           |          |          |            |            | postgres=CTc/postgres
+ template1 | postgres | UTF8     | en_US.utf8 | en_US.utf8 | =c/postgres          +
+           |          |          |            |            | postgres=CTc/postgres
+ test      | postgres | UTF8     | en_US.utf8 | en_US.utf8 | 
+(4 rows)
+
+postgres=# \q
+[postgres@cuug_pg1 ~]$ psql -h cuug -p 1922 -U scott_pg test
+Password for user scott_pg: 
+psql (12.2)
+Type "help" for help.
+
+test=> \l
+                                 List of databases
+    Name    |  Owner   | Encoding |  Collate   |   Ctype    |   Access privileges   
+------------+----------+----------+------------+------------+-----------------------
+ bosco_test | bosco    | UTF8     | en_US.utf8 | en_US.utf8 | 
+ postgres   | postgres | UTF8     | en_US.utf8 | en_US.utf8 | 
+ template0  | postgres | UTF8     | en_US.utf8 | en_US.utf8 | =c/postgres          +
+            |          |          |            |            | postgres=CTc/postgres
+ template1  | postgres | UTF8     | en_US.utf8 | en_US.utf8 | =c/postgres          +
+            |          |          |            |            | postgres=CTc/postgres
+ test       | postgres | UTF8     | en_US.utf8 | en_US.utf8 | 
+(5 rows)
+
+test=> 
